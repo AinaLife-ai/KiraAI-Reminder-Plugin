@@ -9,7 +9,7 @@
   "tags": ["reminder", "schedule", "task"],
   "locales": {
     "zh": {
-      "display_name": "提醒插件",
+      "display_name": "Reminder插件",
       "description": "提供定时提醒、重复提醒、随机提醒、待办管理和 WebUI 看板。"
     },
     "en": {

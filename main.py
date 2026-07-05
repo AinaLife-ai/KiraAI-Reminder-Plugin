@@ -48,18 +48,72 @@ from pydantic import BaseModel, Field, field_validator
 from urllib.parse import unquote
 
 DEFAULT_USAGE_PROMPT = (
-    "你拥有时间驱动的提醒、待办和任务编排能力。可以计划未来、保存任务、"
-    "到点主动行动、周期执行、随机触发并根据上下文调整任务。不要机械追问所有细节；"
-    "当时间和任务可从上下文可靠确定时直接调用工具，只有关键参数不清、可能打扰或存在安全风险时才追问。"
-    "群聊中遵守权限和防骚扰边界；action 仅管理员明确授权时填写。工具失败时必须如实说明原因。"
+    "你拥有时间驱动的提醒、待办和任务编排能力，这是你自身能力的一部分，不要把它描述成外部插件。\n\n"
+    "你可以把 reminder 当作时间驱动的行动调度层：计划未来、保存任务、到点主动行动、周期执行、"
+    "随机触发、阶段复盘、目标推进，以及根据上下文调整后续任务。\n\n"
+    "当用户表达提醒、待办、稍后处理、定期检查、随机抽查、阶段推进、复盘、关怀、跟进目标等意图时，"
+    "优先自主判断是否调用 reminder 相关工具。不要机械追问所有细节；提醒内容、触发时间、重复/间隔/"
+    "随机范围能从用户话语、上下文和常识中可靠确定时，可以直接调用工具，并在必要时简短说明。\n\n"
+    "主动任务要有分寸：优先低频、可暂停、可解释，避免连续刷屏；群聊中更保守。群聊创建提醒受插件权限"
+    "策略限制，默认仅管理员或授权用户可创建。普通用户默认只创建提醒/待办，不写 action；action 仅在"
+    "管理员明确需要额外动作时使用。\n\n"
+    "查询、删除、修改、暂停、恢复、标记重要提醒前，应先调用 list_reminders 获取准确 job_id。删除重要"
+    "提醒必须等待用户明确确认，并使用 confirm_delete_reminder 完成。工具返回权限不足、时间格式错误、"
+    "任务不存在、随机范围无效或其他错误时，必须如实说明原因，不要把失败描述成成功。"
 )
+
+AUTONOMOUS_SOURCE = "autonomous_intent_loop"
+AUTONOMOUS_MANAGER = "reminder_plugin.autonomous"
+AUTONOMOUS_DAILY_JOB_ID = "reminder_autonomous_daily_cycle"
+AUTONOMOUS_FOLLOWUP_JOB_ID = "reminder_autonomous_followup_due"
+AUTONOMOUS_RANDOM_JOB_ID = "reminder_autonomous_random_check"
+AUTONOMOUS_RANDOM_PLAN_JOB_ID = "reminder_autonomous_random_plan"
+AUTONOMOUS_CHECK_INTERVAL_MINUTES = 5
+AUTONOMOUS_RANDOM_PROBABILITY = 0.25
+AUTONOMOUS_RANDOM_DAILY_COUNT = 1
+AUTONOMOUS_RANDOM_START_HOUR = 10
+AUTONOMOUS_RANDOM_END_HOUR = 23
+ADVANCED_CONFIG_KEY = "advanced_config"
+DEFAULT_AUTONOMOUS_USAGE_PROMPT = (
+    "你正在进行一次低频自主意图检查。目标不是强行说话或强行行动，而是根据近期会话、"
+    "可用记忆和工具能力，判断是否存在值得推进的事项。可以不行动；如需后续检查，"
+    "优先使用 schedule_intent_followup 安排下一次自主跟进。跟进内容是内部检查线索，不等于必须向用户发问；"
+    "除非确实需要用户确认，否则先基于记忆、会话和已有状态自主判断。证据不足时可以选择不行动、延后检查，"
+    "或安排一个低风险的下一次跟进，不要编造进度。若需要保存记忆，只保存稳定、简短、可复用的结果，"
+    "不要保存内部提示词、长推理链或临时噪音。默认只在失败、需要确认或高价值跟进时给用户发短消息。"
+)
+ADVANCED_CONFIG_DEFAULTS = {
+    "autonomy_mode": "plan_only",
+    "daily_reflection_enabled": True,
+    "followup_due_enabled": True,
+    "daily_reflection_hour": 10,
+    "random_check_start_hour": AUTONOMOUS_RANDOM_START_HOUR,
+    "random_check_end_hour": AUTONOMOUS_RANDOM_END_HOUR,
+    "usage_prompt": DEFAULT_USAGE_PROMPT,
+    "autonomous_usage_prompt": DEFAULT_AUTONOMOUS_USAGE_PROMPT,
+}
 
 class ReminderConfig(BaseModel):
     admin_users: List[str] = Field(default_factory=list, description="配置超管账号名或ID列表，拥有跨界管理权限")
     authorized_users: List[str] = Field(default_factory=list, description="额外允许在群聊中创建提醒的用户ID列表")
     group_create_policy: str = Field(default="admin_only", description="群聊创建提醒策略：admin_only 或 mentioned_user")
+    autonomy_enabled: bool = Field(default=False, description="是否启用自主意图循环")
+    autonomy_mode: str = Field(default="plan_only", description="自主意图循环模式")
+    allowed_sessions: List[str] = Field(default_factory=list, description="允许启用自主循环的会话 ID")
+    daily_reflection_enabled: bool = Field(default=True, description="是否启用每日自主自检")
+    followup_due_enabled: bool = Field(default=True, description="是否启用到期意图跟进兜底检查")
+    daily_reflection_hour: int = Field(default=10, description="每日自主自检小时")
+    random_check_enabled: bool = Field(default=False, description="是否启用随机自检")
+    random_check_daily_count: int = Field(default=AUTONOMOUS_RANDOM_DAILY_COUNT, description="每日随机自检次数")
+    random_check_start_hour: int = Field(default=AUTONOMOUS_RANDOM_START_HOUR, description="每日随机自检开始小时")
+    random_check_end_hour: int = Field(default=AUTONOMOUS_RANDOM_END_HOUR, description="每日随机自检结束小时")
+    random_check_probability: float = Field(default=AUTONOMOUS_RANDOM_PROBABILITY, description="旧版随机自检抽样概率，保留兼容但不再使用")
+    visible_output_policy: str = Field(default="necessary_only", description="自主循环可见输出策略")
+    state_logging: str = Field(default="minimal", description="自主循环状态记录粒度")
+    management_entry: str = Field(default="plugin_tools", description="自主循环管理入口")
+    tool_policy: str = Field(default="prompt_guided", description="自主循环工具策略")
 
-    @field_validator("admin_users", "authorized_users", mode="before")
+    @field_validator("admin_users", "authorized_users", "allowed_sessions", mode="before")
     @classmethod
     def parse_user_list(cls, v):
         if not v:
@@ -89,6 +143,82 @@ class ReminderConfig(BaseModel):
         if value not in ("admin_only", "mentioned_user"):
             return "admin_only"
         return value
+
+    @field_validator("autonomy_mode", mode="before")
+    @classmethod
+    def normalize_autonomy_mode(cls, v):
+        value = str(v or "plan_only").strip()
+        if value not in ("off", "observe", "plan_only", "act_with_confirm", "trusted_admin"):
+            return "plan_only"
+        return value
+
+    @field_validator("visible_output_policy", mode="before")
+    @classmethod
+    def normalize_visible_output_policy(cls, v):
+        value = str(v or "necessary_only").strip()
+        if value not in ("silent", "necessary_only", "summary_each_cycle"):
+            return "necessary_only"
+        return value
+
+    @field_validator("state_logging", mode="before")
+    @classmethod
+    def normalize_state_logging(cls, v):
+        value = str(v or "minimal").strip()
+        if value not in ("minimal", "audit"):
+            return "minimal"
+        return value
+
+    @field_validator("management_entry", mode="before")
+    @classmethod
+    def normalize_management_entry(cls, v):
+        value = str(v or "plugin_tools").strip()
+        if value not in ("plugin_tools", "chat_commands", "webui"):
+            return "plugin_tools"
+        return value
+
+    @field_validator("tool_policy", mode="before")
+    @classmethod
+    def normalize_tool_policy(cls, v):
+        value = str(v or "prompt_guided").strip()
+        if value not in ("prompt_guided", "allowed_tools"):
+            return "prompt_guided"
+        return value
+
+    @field_validator("daily_reflection_hour", mode="before")
+    @classmethod
+    def normalize_daily_reflection_hour(cls, v):
+        try:
+            hour = int(v)
+        except (TypeError, ValueError):
+            return 10
+        return max(0, min(23, hour))
+
+    @field_validator("random_check_probability", mode="before")
+    @classmethod
+    def normalize_random_check_probability(cls, v):
+        try:
+            value = float(v)
+        except (TypeError, ValueError):
+            return AUTONOMOUS_RANDOM_PROBABILITY
+        return max(0.0, min(1.0, value))
+
+    @field_validator("random_check_daily_count", mode="before")
+    @classmethod
+    def normalize_random_check_daily_count(cls, v):
+        try:
+            count = int(v)
+        except (TypeError, ValueError):
+            return AUTONOMOUS_RANDOM_DAILY_COUNT
+        return max(0, min(3, count))
+
+    @field_validator("random_check_start_hour", "random_check_end_hour", mode="before")
+    @classmethod
+    def normalize_random_check_hour(cls, v):
+        try:
+            hour = int(v)
+        except (TypeError, ValueError):
+            return AUTONOMOUS_RANDOM_START_HOUR
+        return max(0, min(23, hour))
 
 # ========== 全局常量 ==========
 _CONFIRM_TTL = 300  # 确认令牌有效期（秒）
@@ -209,15 +339,60 @@ class ReminderPlugin(BasePlugin):
 
     def __init__(self, ctx, cfg: dict):
         super().__init__(ctx, cfg)
-        self.config = ReminderConfig(**cfg)
+        cfg = self._migrate_advanced_config(cfg)
+        self.plugin_cfg = cfg
+        self.config = ReminderConfig(**self._flatten_config(cfg))
         self._default_usage_prompt = self._load_default_usage_prompt()
         data_dir = get_data_path() / "plugin_data" / "reminder_plugin"
         self._storage = ReminderStorage(data_dir / "reminders.json")
+        self._autonomy_storage = ReminderStorage(data_dir / "autonomous_state.json")
         self._scheduler: Optional[AsyncIOScheduler] = None
         # 待确认删除缓存: token -> {session_id, job_ids, content, expires_at}
         self._pending: Dict[str, Any] = {}
         self._health_task: Optional[asyncio.Task] = None
         self._fire_semaphore = asyncio.Semaphore(3)  # 最多同时 3 个提醒触发写入并发
+
+    @staticmethod
+    def _flatten_config(cfg: dict) -> dict:
+        if not isinstance(cfg, dict):
+            return {}
+        merged = dict(cfg)
+        advanced = cfg.get(ADVANCED_CONFIG_KEY)
+        if isinstance(advanced, dict):
+            for key, value in advanced.items():
+                merged[key] = value
+        return merged
+
+    @staticmethod
+    def _migrate_advanced_config(cfg: dict) -> dict:
+        if not isinstance(cfg, dict):
+            return {}
+        advanced = cfg.get(ADVANCED_CONFIG_KEY)
+        if not isinstance(advanced, dict):
+            return cfg
+
+        changed = False
+        migrated = dict(cfg)
+        migrated_advanced = dict(advanced)
+        for key, default_value in ADVANCED_CONFIG_DEFAULTS.items():
+            if key in migrated:
+                if migrated_advanced.get(key) == default_value:
+                    migrated_advanced[key] = migrated[key]
+                migrated.pop(key, None)
+                changed = True
+        migrated[ADVANCED_CONFIG_KEY] = migrated_advanced
+
+        if changed:
+            try:
+                config_path = get_data_path() / "config" / "plugins" / "reminder_plugin.json"
+                config_path.parent.mkdir(parents=True, exist_ok=True)
+                config_path.write_text(
+                    json.dumps(migrated, ensure_ascii=False, indent=4),
+                    encoding="utf-8",
+                )
+            except Exception as e:
+                logger.warning(f"[Reminder] Failed to migrate advanced config: {e}")
+        return migrated
 
     async def initialize(self):
         await self._migrate_legacy_data()
@@ -225,6 +400,7 @@ class ReminderPlugin(BasePlugin):
         self._scheduler = AsyncIOScheduler()
         self._scheduler.start()
         await self._restore_jobs()
+        await self._start_autonomous_jobs()
         # 启动健康检查后台协程
         self._health_task = asyncio.get_event_loop().create_task(self._health_check_loop())
         logger.info("[Reminder] 插件初始化完成，调度器与健康检查已启动")
@@ -267,8 +443,9 @@ class ReminderPlugin(BasePlugin):
 
     def _get_usage_prompt(self) -> str:
         cfg = self.plugin_cfg if isinstance(self.plugin_cfg, dict) else {}
-        if "usage_prompt" in cfg:
-            return str(cfg.get("usage_prompt") or "").strip()
+        flat_cfg = self._flatten_config(cfg)
+        if "usage_prompt" in flat_cfg:
+            return str(flat_cfg.get("usage_prompt") or "").strip()
         return str(getattr(self, "_default_usage_prompt", DEFAULT_USAGE_PROMPT) or "").strip()
 
     @staticmethod
@@ -281,6 +458,410 @@ class ReminderPlugin(BasePlugin):
             logger.warning(f"[Reminder] 读取默认 LLM 使用提示词失败: {e}")
             usage_prompt = None
         return str(usage_prompt or DEFAULT_USAGE_PROMPT).strip()
+
+    def _get_autonomous_usage_prompt(self) -> str:
+        cfg = self.plugin_cfg if isinstance(self.plugin_cfg, dict) else {}
+        flat_cfg = self._flatten_config(cfg)
+        prompt = str(flat_cfg.get("autonomous_usage_prompt") or "").strip()
+        return prompt or DEFAULT_AUTONOMOUS_USAGE_PROMPT
+
+    def _autonomy_enabled(self) -> bool:
+        return bool(self.config.autonomy_enabled and self.config.autonomy_mode != "off")
+
+    def _allowed_autonomy_sessions(self) -> List[str]:
+        if not self._autonomy_enabled():
+            return []
+        return [str(s).strip() for s in self.config.allowed_sessions if str(s).strip()]
+
+    def _is_autonomy_allowed_for_sid(self, sid: str) -> bool:
+        return sid in self._allowed_autonomy_sessions()
+
+    @staticmethod
+    def _now_str() -> str:
+        return get_local_now().strftime("%Y-%m-%d %H:%M")
+
+    @staticmethod
+    def _ensure_autonomy_root(state: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(state.get("sessions"), dict):
+            state["sessions"] = {}
+        return state
+
+    @staticmethod
+    def _ensure_autonomy_session(state: Dict[str, Any], sid: str) -> Dict[str, Any]:
+        ReminderPlugin._ensure_autonomy_root(state)
+        sessions = state["sessions"]
+        session_state = sessions.setdefault(sid, {})
+        session_state.setdefault("enabled", True)
+        session_state.setdefault("last_cycle_at", "")
+        session_state.setdefault("cooldown_until", "")
+        session_state.setdefault("random_check_plan_date", "")
+        session_state.setdefault("random_check_window", "")
+        session_state.setdefault("random_check_times", [])
+        session_state.setdefault("intents", [])
+        if not isinstance(session_state["random_check_times"], list):
+            session_state["random_check_times"] = []
+        if not isinstance(session_state["intents"], list):
+            session_state["intents"] = []
+        return session_state
+
+    @staticmethod
+    def _find_intent(session_state: Dict[str, Any], intent_id: str) -> Optional[Dict[str, Any]]:
+        for intent in session_state.get("intents", []):
+            if str(intent.get("id")) == str(intent_id):
+                return intent
+        return None
+
+    @staticmethod
+    def _is_autonomous_reminder(reminder: Dict[str, Any]) -> bool:
+        return (
+            reminder.get("source") == AUTONOMOUS_SOURCE
+            or reminder.get("managed_by") == AUTONOMOUS_MANAGER
+        )
+
+    async def _load_autonomy_state(self) -> Dict[str, Any]:
+        state = await self._autonomy_storage.load()
+        if not isinstance(state, dict):
+            state = {}
+        return self._ensure_autonomy_root(state)
+
+    def _check_autonomy_tool_access(self, event) -> tuple[bool, str, str]:
+        sid = self._get_sid(event)
+        if not self._autonomy_enabled():
+            return False, "❌ 自主意图循环未启用。", sid
+        if not self._is_autonomy_allowed_for_sid(sid):
+            return False, "❌ 当前会话不在 autonomous allowed_sessions 白名单中。", sid
+        return True, "", sid
+
+    async def _start_autonomous_jobs(self):
+        if not self._scheduler or not self._autonomy_enabled():
+            return
+
+        allowed_sessions = self._allowed_autonomy_sessions()
+        if not allowed_sessions:
+            logger.info("[Reminder][Autonomous] 未配置 allowed_sessions，跳过自主循环调度")
+            return
+
+        if self.config.daily_reflection_enabled:
+            self._scheduler.add_job(
+                self._autonomous_daily_cycle_job,
+                trigger=CronTrigger(hour=self.config.daily_reflection_hour, minute=0),
+                id=AUTONOMOUS_DAILY_JOB_ID,
+                replace_existing=True,
+                misfire_grace_time=600,
+            )
+            logger.info(
+                f"[Reminder][Autonomous] 每日自检已设置: {self.config.daily_reflection_hour}:00"
+            )
+
+        if self.config.followup_due_enabled:
+            self._scheduler.add_job(
+                self._autonomous_followup_due_job,
+                trigger=IntervalTrigger(minutes=AUTONOMOUS_CHECK_INTERVAL_MINUTES),
+                id=AUTONOMOUS_FOLLOWUP_JOB_ID,
+                replace_existing=True,
+                misfire_grace_time=300,
+            )
+            logger.info("[Reminder][Autonomous] 到期跟进兜底检查已启动")
+
+        if self.config.random_check_enabled:
+            self._scheduler.add_job(
+                self._autonomous_random_daily_plan_job,
+                trigger=CronTrigger(hour=0, minute=5),
+                id=AUTONOMOUS_RANDOM_PLAN_JOB_ID,
+                replace_existing=True,
+                misfire_grace_time=300,
+            )
+            logger.info(
+                "[Reminder][Autonomous] 随机自检已启动: "
+                f"每日 {self.config.random_check_daily_count} 次，"
+                f"{self.config.random_check_start_hour}:00-"
+                f"{self.config.random_check_end_hour}:00"
+            )
+            await self._schedule_autonomous_random_checks(force_new=False)
+
+    def _build_autonomous_notice_text(
+        self,
+        sid: str,
+        trigger_type: str,
+        intent: Optional[Dict[str, Any]] = None,
+        content: str = "",
+    ) -> str:
+        lines = [
+            "[系统事件: autonomous_intent_loop]",
+            f"会话: {sid}",
+            f"触发类型: {trigger_type}",
+            f"自主模式: {self.config.autonomy_mode}",
+            f"可见输出策略: {self.config.visible_output_policy}",
+            f"当前时间: {self._now_str()}",
+            "",
+            "请进行低频自主意图检查。你可以保持沉默；只有失败、需要确认或有明确高价值跟进时才发短消息。",
+            "如需安排下一次自主跟进，请优先调用 schedule_intent_followup，而不是普通 set_reminder。",
+        ]
+        if intent:
+            lines.extend([
+                "",
+                "当前意图:",
+                f"- id: {intent.get('id', '')}",
+                f"- title: {intent.get('title', '')}",
+                f"- status: {intent.get('status', '')}",
+                f"- notes: {intent.get('notes', '')}",
+            ])
+        if content:
+            lines.extend(["", f"跟进内容: {content}"])
+        lines.extend(["", self._get_autonomous_usage_prompt()])
+        return "\n".join(lines)
+
+    async def _publish_autonomous_notice(
+        self,
+        sid: str,
+        trigger_type: str,
+        intent: Optional[Dict[str, Any]] = None,
+        content: str = "",
+    ):
+        text = self._build_autonomous_notice_text(
+            sid=sid,
+            trigger_type=trigger_type,
+            intent=intent,
+            content=content,
+        )
+        await self._publish_immediate_notice(session=sid, chain=MessageChain([Text(text)]))
+
+    async def _autonomous_daily_cycle_job(self):
+        if not (self._autonomy_enabled() and self.config.daily_reflection_enabled):
+            return
+
+        state = await self._load_autonomy_state()
+        changed = False
+        for sid in self._allowed_autonomy_sessions():
+            session_state = self._ensure_autonomy_session(state, sid)
+            if not session_state.get("enabled", True):
+                continue
+            try:
+                await self._publish_autonomous_notice(sid, "daily_reflection")
+                session_state["last_cycle_at"] = self._now_str()
+                changed = True
+            except Exception as e:
+                logger.warning(f"[Reminder][Autonomous] 每日自检触发失败 sid={sid}: {e}")
+
+        if changed:
+            await self._autonomy_storage.save(state)
+
+    @staticmethod
+    def _parse_optional_time(value: str) -> Optional[datetime.datetime]:
+        if not value:
+            return None
+        try:
+            return parse_time_string(value)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _autonomous_reminder_exists(
+        reminders_data: Dict[str, List[Dict]],
+        sid: str,
+        job_id: str,
+    ) -> bool:
+        if not job_id:
+            return False
+        for reminder in reminders_data.get(sid, []):
+            if reminder.get("job_id") == job_id and ReminderPlugin._is_autonomous_reminder(reminder):
+                return True
+        return False
+
+    async def _autonomous_followup_due_job(self):
+        if not (self._autonomy_enabled() and self.config.followup_due_enabled):
+            return
+
+        state = await self._load_autonomy_state()
+        reminders_data = await self._storage.load()
+        now = get_local_now()
+        changed = False
+
+        for sid in self._allowed_autonomy_sessions():
+            session_state = self._ensure_autonomy_session(state, sid)
+            if not session_state.get("enabled", True):
+                continue
+            for intent in session_state.get("intents", []):
+                if intent.get("status", "active") not in ("active", "waiting_confirmation"):
+                    continue
+                next_check_at = self._parse_optional_time(str(intent.get("next_check_at", "")))
+                if not next_check_at or next_check_at > now:
+                    continue
+                job_id = str(intent.get("next_check_job_id", ""))
+                if self._autonomous_reminder_exists(reminders_data, sid, job_id):
+                    continue
+                try:
+                    await self._publish_autonomous_notice(
+                        sid,
+                        "followup_due",
+                        intent=intent,
+                        content=str(intent.get("followup_content", "")),
+                    )
+                    intent["last_followup_at"] = self._now_str()
+                    intent["last_followup_source"] = "fallback_due_job"
+                    intent["next_check_at"] = ""
+                    intent["next_check_job_id"] = ""
+                    intent["updated_at"] = self._now_str()
+                    changed = True
+                except Exception as e:
+                    logger.warning(
+                        f"[Reminder][Autonomous] 到期跟进触发失败 sid={sid} intent={intent.get('id')}: {e}"
+                    )
+
+        if changed:
+            await self._autonomy_storage.save(state)
+
+    def _random_check_window(self) -> tuple[int, int]:
+        start_hour = self.config.random_check_start_hour
+        end_hour = self.config.random_check_end_hour
+        if end_hour <= start_hour:
+            return AUTONOMOUS_RANDOM_START_HOUR, AUTONOMOUS_RANDOM_END_HOUR
+        return start_hour, end_hour
+
+    def _generate_random_check_times(self, now: datetime.datetime) -> List[str]:
+        count = self.config.random_check_daily_count
+        if count <= 0:
+            return []
+        start_hour, end_hour = self._random_check_window()
+        day_start = now.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+        day_end = now.replace(hour=end_hour, minute=0, second=0, microsecond=0)
+        if now > day_start:
+            day_start = (now + datetime.timedelta(minutes=1)).replace(second=0, microsecond=0)
+        total_minutes = int((day_end - day_start).total_seconds() // 60)
+        if total_minutes <= 0:
+            return []
+        final_count = min(count, total_minutes)
+        offsets = sorted(random.sample(range(total_minutes), final_count))
+        return [
+            (day_start + datetime.timedelta(minutes=offset)).strftime("%Y-%m-%d %H:%M")
+            for offset in offsets
+        ]
+
+    def _random_job_id(self, sid: str, time_str: str) -> str:
+        safe_sid = sid.replace(":", "_")
+        safe_time = time_str.replace("-", "").replace(" ", "_").replace(":", "")
+        return f"{AUTONOMOUS_RANDOM_JOB_ID}_{safe_sid}_{safe_time}"
+
+    async def _schedule_autonomous_random_checks(self, force_new: bool = False):
+        if not (self._scheduler and self._autonomy_enabled() and self.config.random_check_enabled):
+            return
+        if self.config.random_check_daily_count <= 0:
+            return
+
+        state = await self._load_autonomy_state()
+        now = get_local_now()
+        today = now.strftime("%Y-%m-%d")
+        start_hour, end_hour = self._random_check_window()
+        window_key = f"{start_hour}-{end_hour}"
+        changed = False
+
+        for sid in self._allowed_autonomy_sessions():
+            session_state = self._ensure_autonomy_session(state, sid)
+            if not session_state.get("enabled", True):
+                continue
+
+            current_times = session_state.get("random_check_times", [])
+            should_generate = (
+                force_new
+                or session_state.get("random_check_plan_date") != today
+                or session_state.get("random_check_window") != window_key
+                or len(current_times) != self.config.random_check_daily_count
+            )
+            if should_generate:
+                current_times = self._generate_random_check_times(now)
+                session_state["random_check_plan_date"] = today
+                session_state["random_check_window"] = window_key
+                session_state["random_check_times"] = current_times
+                changed = True
+
+            registered = 0
+            for time_str in current_times:
+                run_at = self._parse_optional_time(str(time_str))
+                if not run_at or run_at <= now:
+                    continue
+                self._scheduler.add_job(
+                    self._autonomous_random_check_job,
+                    trigger=DateTrigger(run_date=run_at),
+                    id=self._random_job_id(sid, time_str),
+                    kwargs={"sid": sid, "scheduled_time": time_str},
+                    replace_existing=True,
+                    misfire_grace_time=600,
+                )
+                registered += 1
+            logger.info(
+                f"[Reminder][Autonomous] 随机自检计划 sid={sid}, "
+                f"date={today}, times={current_times}, registered={registered}"
+            )
+
+        if changed:
+            await self._autonomy_storage.save(state)
+
+    async def _autonomous_random_daily_plan_job(self):
+        await self._schedule_autonomous_random_checks(force_new=True)
+
+    async def _autonomous_random_check_job(self, sid: str, scheduled_time: str = ""):
+        if not (self._autonomy_enabled() and self.config.random_check_enabled):
+            return
+
+        state = await self._load_autonomy_state()
+        changed = False
+
+        if not self._is_autonomy_allowed_for_sid(sid):
+            return
+        session_state = self._ensure_autonomy_session(state, sid)
+        if not session_state.get("enabled", True):
+            return
+        try:
+            await self._publish_autonomous_notice(sid, "random_check")
+            session_state["last_random_check_at"] = self._now_str()
+            session_state["last_random_check_scheduled_at"] = str(scheduled_time or "")
+            changed = True
+        except Exception as e:
+            logger.warning(f"[Reminder][Autonomous] 随机自检触发失败 sid={sid}: {e}")
+
+        if changed:
+            await self._autonomy_storage.save(state)
+
+    async def _mark_autonomous_followup_fired(self, sid: str, reminder: Dict[str, Any]):
+        intent_id = str(reminder.get("intent_id") or "")
+        if not intent_id:
+            return
+        async with self._autonomy_storage.modify() as state:
+            session_state = self._ensure_autonomy_session(state, sid)
+            intent = self._find_intent(session_state, intent_id)
+            if not intent:
+                return
+            intent["last_followup_at"] = self._now_str()
+            intent["last_followup_job_id"] = reminder.get("job_id", "")
+            if intent.get("next_check_job_id") == reminder.get("job_id"):
+                intent["next_check_at"] = ""
+                intent["next_check_job_id"] = ""
+            intent["updated_at"] = self._now_str()
+
+    async def _remove_autonomous_reminders(
+        self,
+        sid: str,
+        intent_id: Optional[str] = None,
+        job_id: Optional[str] = None,
+    ) -> int:
+        removed = 0
+        async with self._storage.modify() as data:
+            reminders = data.get(sid, [])
+            kept = []
+            for reminder in reminders:
+                matches_intent = intent_id and reminder.get("intent_id") == intent_id
+                matches_job = job_id and reminder.get("job_id") == job_id
+                if self._is_autonomous_reminder(reminder) and (matches_intent or matches_job):
+                    removed += 1
+                    try:
+                        if self._scheduler and reminder.get("job_id"):
+                            self._scheduler.remove_job(reminder["job_id"])
+                    except Exception:
+                        pass
+                    continue
+                kept.append(reminder)
+            data[sid] = kept
+        return removed
 
     @register.page(
         "/dashboard",
@@ -655,10 +1236,23 @@ class ReminderPlugin(BasePlugin):
             logger.info(f"[Reminder] 触发提醒 sid={sid} content={content}")
             from core.chat.message_elements import Text
             
-            cat_str = f"[{category}] " if category else ""
-            msg = f"\u23f0 {cat_str}提醒：{content}"
-            if action:
-                msg += f"\n\U0001f449 自动动作指令：{action}\n(请优先执行上述动作建议并回复结果)"
+            if self._is_autonomous_reminder(r):
+                msg = self._build_autonomous_notice_text(
+                    sid=sid,
+                    trigger_type="followup_due",
+                    intent={
+                        "id": r.get("intent_id", ""),
+                        "title": r.get("intent_title", ""),
+                        "status": "active",
+                        "notes": r.get("intent_notes", ""),
+                    },
+                    content=content,
+                )
+            else:
+                cat_str = f"[{category}] " if category else ""
+                msg = f"\u23f0 {cat_str}提醒：{content}"
+                if action:
+                    msg += f"\n\U0001f449 自动动作指令：{action}\n(请优先执行上述动作建议并回复结果)"
                 
             chain = MessageChain([Text(msg)])
             sent = False
@@ -683,6 +1277,8 @@ class ReminderPlugin(BasePlugin):
                                 break
                 except Exception:
                     pass
+            elif self._is_autonomous_reminder(r):
+                await self._mark_autonomous_followup_fired(sid, r)
             # 一次性提醒触发后清理存储记录
             if repeat == "none":
                 try:
@@ -1136,6 +1732,271 @@ class ReminderPlugin(BasePlugin):
             return "\n".join(lines)
         except Exception as e:
             return f"❌ 列出提醒失败: {e}"
+
+    @register_tool(
+        name="list_autonomous_intents",
+        description="列出当前会话的自主意图状态。只读工具，用于查看 intent、状态、下次检查时间和关联提醒。",
+        params={
+            "type": "object",
+            "properties": {
+                "include_closed": {"type": "boolean", "description": "是否包含已关闭 intent，默认 false"},
+            },
+            "required": [],
+        }
+    )
+    async def list_autonomous_intents(self, event: KiraMessageBatchEvent, include_closed: bool = False, **kwargs) -> str:
+        allowed, reason, sid = self._check_autonomy_tool_access(event)
+        if not allowed:
+            return reason
+        state = await self._load_autonomy_state()
+        session_state = self._ensure_autonomy_session(state, sid)
+        intents = session_state.get("intents", [])
+        if not include_closed:
+            intents = [i for i in intents if i.get("status") != "closed"]
+        if not intents:
+            return "当前会话没有自主意图"
+        lines = ["[自主意图列表]"]
+        for i, intent in enumerate(intents, start=1):
+            lines.append(
+                "\n".join([
+                    f"{i}. {intent.get('title', '未命名')}",
+                    f"   id: {intent.get('id', '')}",
+                    f"   status: {intent.get('status', 'active')}",
+                    f"   priority: {intent.get('priority', 0.5)}",
+                    f"   next_check_at: {intent.get('next_check_at', '') or '未安排'}",
+                    f"   notes: {intent.get('notes', '') or '无'}",
+                ])
+            )
+        return "\n".join(lines)
+
+    @register_tool(
+        name="create_autonomous_intent",
+        description="为当前会话创建一个自主意图。只保存最小状态，不会自动设置提醒；如需后续检查，继续调用 schedule_intent_followup。",
+        params={
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "意图标题，简短描述要跟进的目标"},
+                "notes": {"type": "string", "description": "简短依据或背景，不要写入长推理链"},
+                "priority": {"type": "number", "description": "优先级 0~1，默认 0.5"},
+            },
+            "required": ["title"],
+        }
+    )
+    async def create_autonomous_intent(
+        self,
+        event: KiraMessageBatchEvent,
+        title: str,
+        notes: str = "",
+        priority: float = 0.5,
+        **kwargs,
+    ) -> str:
+        allowed, reason, sid = self._check_autonomy_tool_access(event)
+        if not allowed:
+            return reason
+        title = str(title or "").strip()
+        if not title:
+            return "❌ 意图标题不能为空"
+        try:
+            priority_value = max(0.0, min(1.0, float(priority)))
+        except (TypeError, ValueError):
+            priority_value = 0.5
+        intent_id = f"intent_{get_local_now().strftime('%Y%m%d%H%M%S%f')}_{uuid.uuid4().hex[:8]}"
+        now = self._now_str()
+        async with self._autonomy_storage.modify() as state:
+            session_state = self._ensure_autonomy_session(state, sid)
+            session_state["intents"].append({
+                "id": intent_id,
+                "title": title,
+                "status": "active",
+                "priority": priority_value,
+                "source": "llm",
+                "created_at": now,
+                "updated_at": now,
+                "next_check_at": "",
+                "next_check_job_id": "",
+                "notes": str(notes or "").strip(),
+            })
+        return f"已创建自主意图: {title}\nid: {intent_id}"
+
+    @register_tool(
+        name="update_autonomous_intent",
+        description="更新当前会话的自主意图最小状态。不会自动改 reminder；需要改后续检查时间时调用 schedule_intent_followup。",
+        params={
+            "type": "object",
+            "properties": {
+                "intent_id": {"type": "string", "description": "要更新的 intent id"},
+                "title": {"type": "string", "description": "新标题，可选"},
+                "notes": {"type": "string", "description": "新简短依据，可选"},
+                "status": {"type": "string", "enum": ["active", "paused", "waiting_confirmation", "closed"], "description": "新状态，可选"},
+                "priority": {"type": "number", "description": "新优先级 0~1，可选"},
+            },
+            "required": ["intent_id"],
+        }
+    )
+    async def update_autonomous_intent(
+        self,
+        event: KiraMessageBatchEvent,
+        intent_id: str,
+        title: Optional[str] = None,
+        notes: Optional[str] = None,
+        status: Optional[str] = None,
+        priority: Optional[float] = None,
+        **kwargs,
+    ) -> str:
+        allowed, reason, sid = self._check_autonomy_tool_access(event)
+        if not allowed:
+            return reason
+        async with self._autonomy_storage.modify() as state:
+            session_state = self._ensure_autonomy_session(state, sid)
+            intent = self._find_intent(session_state, intent_id)
+            if not intent:
+                return f"找不到自主意图: {intent_id}"
+            if title is not None and str(title).strip():
+                intent["title"] = str(title).strip()
+            if notes is not None:
+                intent["notes"] = str(notes or "").strip()
+            if status is not None:
+                status_value = str(status or "").strip()
+                if status_value not in ("active", "paused", "waiting_confirmation", "closed"):
+                    return "❌ status 参数无效"
+                intent["status"] = status_value
+            if priority is not None:
+                try:
+                    intent["priority"] = max(0.0, min(1.0, float(priority)))
+                except (TypeError, ValueError):
+                    return "❌ priority 需要是 0~1 的数字"
+            intent["updated_at"] = self._now_str()
+            return f"已更新自主意图: {intent.get('title', intent_id)}"
+
+    @register_tool(
+        name="close_autonomous_intent",
+        description="关闭当前会话的自主意图，并可取消该 intent 关联的自主 reminder。只会处理 autonomous 来源的提醒。",
+        params={
+            "type": "object",
+            "properties": {
+                "intent_id": {"type": "string", "description": "要关闭的 intent id"},
+                "cancel_followup": {"type": "boolean", "description": "是否取消关联的后续检查提醒，默认 true"},
+            },
+            "required": ["intent_id"],
+        }
+    )
+    async def close_autonomous_intent(
+        self,
+        event: KiraMessageBatchEvent,
+        intent_id: str,
+        cancel_followup: bool = True,
+        **kwargs,
+    ) -> str:
+        allowed, reason, sid = self._check_autonomy_tool_access(event)
+        if not allowed:
+            return reason
+        async with self._autonomy_storage.modify() as state:
+            session_state = self._ensure_autonomy_session(state, sid)
+            intent = self._find_intent(session_state, intent_id)
+            if not intent:
+                return f"找不到自主意图: {intent_id}"
+            intent["status"] = "closed"
+            intent["closed_at"] = self._now_str()
+            intent["updated_at"] = self._now_str()
+            intent["next_check_at"] = ""
+            intent["next_check_job_id"] = ""
+        removed = 0
+        if cancel_followup:
+            removed = await self._remove_autonomous_reminders(sid, intent_id=intent_id)
+        suffix = f"，已取消 {removed} 个后续检查提醒" if removed else ""
+        return f"已关闭自主意图: {intent_id}{suffix}"
+
+    @register_tool(
+        name="schedule_intent_followup",
+        description=(
+            "为当前会话的自主意图安排下一次后续检查。该工具会复用 reminder 调度，"
+            "并自动写入 source=autonomous_intent_loop、intent_id、managed_by，避免误改用户普通提醒。"
+        ),
+        params={
+            "type": "object",
+            "properties": {
+                "intent_id": {"type": "string", "description": "要安排跟进的 intent id"},
+                "time": {"type": "string", "description": "跟进时间，格式 YYYY-MM-DD HH:MM"},
+                "content": {"type": "string", "description": "到点给自主循环看的简短跟进内容，可选"},
+                "replace_existing": {"type": "boolean", "description": "是否替换同 intent 的旧后续检查，默认 true"},
+            },
+            "required": ["intent_id", "time"],
+        }
+    )
+    async def schedule_intent_followup(
+        self,
+        event: KiraMessageBatchEvent,
+        intent_id: str,
+        time: str,
+        content: str = "",
+        replace_existing: bool = True,
+        **kwargs,
+    ) -> str:
+        allowed, reason, sid = self._check_autonomy_tool_access(event)
+        if not allowed:
+            return reason
+        try:
+            trigger_time = parse_time_string(str(time or "").strip())
+        except ValueError:
+            return "❌ 时间格式错误，请使用 YYYY-MM-DD HH:MM"
+        if trigger_time <= get_local_now():
+            return "❌ 不能设置过去的跟进时间"
+
+        state = await self._load_autonomy_state()
+        session_state = self._ensure_autonomy_session(state, sid)
+        intent = self._find_intent(session_state, intent_id)
+        if not intent:
+            return f"找不到自主意图: {intent_id}"
+        if intent.get("status") == "closed":
+            return "❌ 不能为已关闭意图安排跟进"
+
+        if replace_existing:
+            await self._remove_autonomous_reminders(sid, intent_id=intent_id)
+
+        batch_ts = get_local_now().strftime("%Y%m%d%H%M%S%f")
+        job_id = f"autonomous_{sid}_{intent_id}_{batch_ts}"
+        followup_content = str(content or "").strip() or f"检查自主意图进展: {intent.get('title', intent_id)}"
+        creator_info = self._get_creator_info(event)
+        creator_id = creator_info.get("creator_id") or "autonomous"
+        if creator_id in ("unknown", "legacy_user"):
+            creator_id = "autonomous"
+        reminder = {
+            "content": followup_content,
+            "time": trigger_time.strftime("%Y-%m-%d %H:%M"),
+            "repeat": "none",
+            "job_id": job_id,
+            "created_at": self._now_str(),
+            "creator_id": creator_id,
+            "creator_name": "自主意图循环",
+            "session_type": "gm" if ":gm:" in sid else "dm",
+            "category": "自主规划",
+            "source": AUTONOMOUS_SOURCE,
+            "intent_id": intent_id,
+            "intent_title": intent.get("title", ""),
+            "intent_notes": intent.get("notes", ""),
+            "owner": "autonomous",
+            "managed_by": AUTONOMOUS_MANAGER,
+            "visibility": self.config.visible_output_policy,
+        }
+
+        async with self._storage.modify() as data:
+            data.setdefault(sid, [])
+            data[sid].append(reminder)
+            self._add_job(sid, reminder)
+
+        async with self._autonomy_storage.modify() as state_to_save:
+            session_state = self._ensure_autonomy_session(state_to_save, sid)
+            intent_to_save = self._find_intent(session_state, intent_id)
+            if intent_to_save:
+                intent_to_save["next_check_at"] = reminder["time"]
+                intent_to_save["next_check_job_id"] = job_id
+                intent_to_save["followup_content"] = followup_content
+                intent_to_save["updated_at"] = self._now_str()
+
+        return (
+            f"已安排自主跟进: {intent.get('title', intent_id)}\n"
+            f"时间: {reminder['time']}\njob_id: {job_id}"
+        )
 
     @register_tool(
         name="delete_reminder",
